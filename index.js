@@ -44,4 +44,67 @@ const shouldRespond = (text) => {
     "next step"
   ];
 
-  if (startsWith.some(p => t.startsWith(p))) return true
+  if (startsWith.some(p => t.startsWith(p))) return true;
+
+  // Explicit help / uncertainty phrases
+  const contains = [
+    "need",
+    "stuck",
+    "blocked",
+    "does anyone know",
+    "i can't",
+    "urgent",
+    "not sure what to do"
+  ];
+
+  return contains.some(p => t.includes(p));
+};
+
+/* -------------------------
+   Health Check
+-------------------------- */
+app.get("/", (req, res) => {
+  res.send("MFG Office Bot is running ✅");
+});
+
+/* -------------------------
+   Telegram Webhook
+-------------------------- */
+app.post("/webhook", async (req, res) => {
+  const message = req.body.message;
+
+  if (!message || !message.text) {
+    return res.sendStatus(200);
+  }
+
+  const chatId = message.chat.id;
+  const text = message.text;
+
+  console.log("Incoming Telegram message:", text);
+
+  // Apply gating
+  if (!shouldRespond(text)) {
+    console.log("Ignored (chatter)");
+    return res.sendStatus(200);
+  }
+
+  // TEMP response (OpenAI comes next step)
+  await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text: "Flagged. This may require escalation. Stand by."
+    })
+  });
+
+  console.log("Bot replied successfully");
+  res.sendStatus(200);
+});
+
+/* -------------------------
+   Start Server
+-------------------------- */
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
