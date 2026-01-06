@@ -1,12 +1,19 @@
-import express from "express";
+app.post("/webhook", async (req, res) => {
+  const message = req.body.message;
+  if (!message || !message.text) {
+    return res.sendStatus(200);
+  }
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+  const chatId = message.chat.id;
 
-app.get("/", (req, res) => {
-  res.send("MFG Office Bot is running ✅");
-});
+  await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text: "✅ Bot connected. Webhook is working."
+    })
+  });
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  res.sendStatus(200);
 });
