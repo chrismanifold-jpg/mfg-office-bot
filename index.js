@@ -136,7 +136,7 @@ EMAIL_TO_CHRIS:
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        chat_id: CHRIS_TELEGRAM_ID,
+        chat_id: Number(CHRIS_TELEGRAM_ID),
         text: DM_TO_CHRIS
       })
     });
