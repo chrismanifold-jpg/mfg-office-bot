@@ -6,7 +6,7 @@ app.use(express.json());
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const CHRIS_TELEGRAM_ID = process.env.CHRIS_TELEGRAM_ID; // numeric ID
+const CHRIS_TELEGRAM_ID = process.env.CHRIS_TELEGRAM_ID; // must be numeric
 const PORT = process.env.PORT || 3000;
 
 /* ---------------------------
@@ -21,15 +21,15 @@ const shouldRespond = (text) => {
   if (t.includes("?")) return true;
 
   const starts = [
-    "how","what","when","where","who",
-    "can you","should i","help","next step"
+    "how", "what", "when", "where", "who",
+    "can you", "should i", "help", "next step"
   ];
   if (starts.some(p => t.startsWith(p))) return true;
 
   const contains = [
-    "need","stuck","blocked",
-    "does anyone know","i can't",
-    "urgent","not sure what to do"
+    "need", "stuck", "blocked",
+    "does anyone know", "i can't",
+    "urgent", "not sure what to do"
   ];
   return contains.some(p => t.includes(p));
 };
@@ -45,23 +45,24 @@ app.get("/", (req, res) => {
    Telegram Webhook
 ---------------------------- */
 app.post("/webhook", async (req, res) => {
-  const message = req.body.message;
-  if (!message || !message.text) return res.sendStatus(200);
+  try {
+    const message = req.body.message;
+    if (!message || !message.text) return res.sendStatus(200);
 
-  const chatId = message.chat.id;
-  const text = message.text;
+    const chatId = message.chat.id;
+    const text = message.text;
 
-  console.log("Incoming Telegram message:", text);
+    console.log("Incoming Telegram message:", text);
 
-  if (!shouldRespond(text)) {
-    console.log("Ignored (chatter)");
-    return res.sendStatus(200);
-  }
+    if (!shouldRespond(text)) {
+      console.log("Ignored (chatter)");
+      return res.sendStatus(200);
+    }
 
-  /* ---------------------------
-     SOP STEP 5 — OPENAI DECISION
-  ---------------------------- */
-  const systemInstructions = `
+    /* ---------------------------
+       SOP STEP 5 — OPENAI DECISION
+    ---------------------------- */
+    const systemInstructions = `
 You are the internal AI assistant for Manifold Financial Group.
 
 You MUST output in this exact structure every time:
@@ -77,75 +78,100 @@ EMAIL_TO_CHRIS:
 <only if ESCALATE=YES, else NONE>
 `;
 
-  const openaiResponse = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${OPENAI_API_KEY}`
-    },
-    body: JSON.stringify({
-      model: "gpt-4.1-mini",
-      messages: [
-        { role: "system", content: systemInstructions },
-        { role: "user", content: text }
-      ],
-      temperature: 0
-    })
-  });
+    const openaiResponse = await fetch(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${OPENAI_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: "gpt-4.1-mini",
+          messages: [
+            { role: "system", content: systemInstructions },
+            { role: "user", content: text }
+          ],
+          temperature: 0
+        })
+      }
+    );
 
-  const data = await openaiResponse.json();
-  const output = data.choices[0].message.content;
+    const data = await openaiResponse.json();
 
-  console.log("OpenAI raw output:\n", output);
+    if (!data.choices || !data.choices[0]) {
+      console.error("OpenAI response malformed:", data);
+      return res.sendStatus(200);
+    }
 
-  /* ---------------------------
-     PARSE DECISION HEADER
-  ---------------------------- */
-  const get = (label) => {
-    const match = output.match(new RegExp(`${label}:([\\s\\S]*?)(?=\\n[A-Z_]+:|$)`));
-    return match ? match[1].trim() : "NONE";
-  };
+    const output = data.choices[0].message.content;
+    console.log("OpenAI raw output:\n", output);
 
-  const ESCALATE = get("ESCALATE");
-  const USER_REPLY = get("USER_REPLY");
-  const DM_TO_CHRIS = get("DM_TO_CHRIS");
-  const EMAIL_TO_CHRIS = get("EMAIL_TO_CHRIS");
+    /* ---------------------------
+       PARSE DECISION HEADER
+    ---------------------------- */
+    const get = (label) => {
+      const match = output.match(
+        new RegExp(`${label}:([\\s\\S]*?)(?=\\n[A-Z_]+:|$)`)
+      );
+      return match ? match[1].trim() : "NONE";
+    };
 
-  /* ---------------------------
-     Public reply (ONLY this)
-  ---------------------------- */
-  await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text: USER_REPLY
-    })
-  });
+    const ESCALATE = get("ESCALATE");
+    const USER_REPLY = get("USER_REPLY") || "Acknowledged. Stand by.";
+    const DM_TO_CHRIS = get("DM_TO_CHRIS");
+    const EMAIL_TO_CHRIS = get("EMAIL_TO_CHRIS");
 
-  console.log("Bot replied successfully");
-
-  /* ---------------------------
-     Escalation delivery
-  ---------------------------- */
-  if (ESCALATE === "YES") {
-    console.log("ESCALATION TRIGGERED");
-
-    // Telegram DM to Chris
+    /* ---------------------------
+       Public reply (ONLY this)
+    ---------------------------- */
     await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        chat_id: Number(CHRIS_TELEGRAM_ID),
-        text: DM_TO_CHRIS
+        chat_id: chatId,
+        text: USER_REPLY
       })
     });
 
-    // Email placeholder (SendGrid/Mailgun next)
-    console.log("EMAIL_TO_CHRIS:\n", EMAIL_TO_CHRIS);
-  }
+    console.log("Bot replied successfully");
 
-  res.sendStatus(200);
+    /* ---------------------------
+       Escalation delivery
+    ---------------------------- */
+    if (ESCALATE === "YES") {
+      console.log("ESCALATION TRIGGERED");
+
+      try {
+        const dmResponse = await fetch(
+          `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: Number(CHRIS_TELEGRAM_ID),
+              text: DM_TO_CHRIS
+            })
+          }
+        );
+
+        const dmResult = await dmResponse.json();
+        console.log("DM send result:", dmResult);
+
+      } catch (dmErr) {
+        console.error("Failed to send DM:", dmErr);
+      }
+
+      // Email placeholder (SendGrid / Mailgun next)
+      console.log("EMAIL_TO_CHRIS:\n", EMAIL_TO_CHRIS);
+    }
+
+    return res.sendStatus(200);
+
+  } catch (err) {
+    console.error("Webhook fatal error:", err);
+    return res.sendStatus(200); // ALWAYS return 200 to Telegram
+  }
 });
 
 /* ---------------------------
