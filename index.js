@@ -73,7 +73,7 @@ app.post("/webhook", async (req, res) => {
     if (!message || !message.text) return res.sendStatus(200);
 
     const chatId = message.chat.id;
-    const userId = message.from.id; // agent Telegram ID
+    const userId = message.from.id;
     const text = message.text;
     const now = Date.now();
 
@@ -83,6 +83,24 @@ app.post("/webhook", async (req, res) => {
       console.log("Ignored (chatter)");
       return res.sendStatus(200);
     }
+
+    /* ---------------------------
+       AGENT ATTRIBUTION (SYSTEM DATA)
+    ---------------------------- */
+    const agentName = message.from.first_name || "Unknown";
+    const agentUsername = message.from.username
+      ? `@${message.from.username}`
+      : "(no username)";
+    const groupName = message.chat.title || "Private Chat";
+    const timestamp = new Date(message.date * 1000).toLocaleString();
+
+    const attributionBlock = `
+Agent: ${agentName} ${agentUsername}
+Group: ${groupName}
+Time: ${timestamp}
+Message:
+"${text}"
+`;
 
     /* ---------------------------
        TOPIC + DEDUP KEY
@@ -147,11 +165,11 @@ app.post("/webhook", async (req, res) => {
         })
       });
     } else {
-      console.log("No public reply (silent)");
+      console.log("No public reply (silent / seen behavior)");
     }
 
     /* ---------------------------
-       ESCALATION (LEVEL 2 DEDUP)
+       ESCALATION (LEVEL 2 DEDUP + ATTRIBUTION)
     ---------------------------- */
     if (ESCALATE === "YES") {
       if (withinCooldown) {
@@ -169,7 +187,7 @@ app.post("/webhook", async (req, res) => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           chat_id: Number(CHRIS_TELEGRAM_ID),
-          text: DM_TO_CHRIS
+          text: `${attributionBlock}\n\n${DM_TO_CHRIS}`
         })
       });
     }
