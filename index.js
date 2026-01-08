@@ -9,6 +9,12 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const CHRIS_TELEGRAM_ID = process.env.CHRIS_TELEGRAM_ID; // must be numeric
 const PORT = process.env.PORT || 3000;
 
+/* ----------------------------------
+   Escalation De-duplication Store
+----------------------------------- */
+// One escalation per Telegram message
+const escalatedMessages = new Set();
+
 /* ---------------------------
    SOP STEP 4 — GATING
 ---------------------------- */
@@ -50,7 +56,10 @@ app.post("/webhook", async (req, res) => {
     if (!message || !message.text) return res.sendStatus(200);
 
     const chatId = message.chat.id;
+    const messageId = message.message_id;
     const text = message.text;
+
+    const escalationKey = `${chatId}:${messageId}`;
 
     console.log("Incoming Telegram message:", text);
 
@@ -137,10 +146,16 @@ EMAIL_TO_CHRIS:
     console.log("Bot replied successfully");
 
     /* ---------------------------
-       Escalation delivery
+       Escalation delivery (DE-DUPED)
     ---------------------------- */
     if (ESCALATE === "YES") {
-      console.log("ESCALATION TRIGGERED");
+      if (escalatedMessages.has(escalationKey)) {
+        console.log("Duplicate escalation prevented:", escalationKey);
+        return res.sendStatus(200);
+      }
+
+      escalatedMessages.add(escalationKey);
+      console.log("ESCALATION TRIGGERED:", escalationKey);
 
       try {
         const dmResponse = await fetch(
