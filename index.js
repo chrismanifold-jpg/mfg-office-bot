@@ -9,18 +9,28 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const CHRIS_TELEGRAM_ID = process.env.CHRIS_TELEGRAM_ID;
 const PORT = process.env.PORT || 3000;
 
-/* ---------------------------
-   DEDUPLICATION STATE
----------------------------- */
+/* ------------------------------------------------
+   LEVEL 2 DEDUP — Agent + Topic + Time Window
+------------------------------------------------- */
 const escalationCache = new Map();
 const DEDUP_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
 
-const normalizeText = (text) =>
-  text
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
+// Simple rule-based topic detection (NO AI yet)
+const detectTopic = (text) => {
+  const t = text.toLowerCase();
+
+  if (t.includes("annuity") || t.includes("500k") || t.includes("$")) {
+    return "high_value_annuity";
+  }
+  if (t.includes("replacement") || t.includes("1035")) {
+    return "replacement_case";
+  }
+  if (t.includes("first appointment")) {
+    return "first_appointment";
+  }
+
+  return "general";
+};
 
 /* ---------------------------
    SOP STEP 4 — GATING
@@ -34,15 +44,15 @@ const shouldRespond = (text) => {
   if (t.includes("?")) return true;
 
   const starts = [
-    "how","what","when","where","who",
-    "can you","should i","help","next step"
+    "how", "what", "when", "where", "who",
+    "can you", "should i", "help", "next step"
   ];
   if (starts.some(p => t.startsWith(p))) return true;
 
   const contains = [
-    "need","stuck","blocked",
-    "does anyone know","i can't",
-    "urgent","not sure what to do"
+    "need", "stuck", "blocked",
+    "does anyone know", "i can't",
+    "urgent", "not sure what to do"
   ];
   return contains.some(p => t.includes(p));
 };
@@ -65,6 +75,7 @@ app.post("/webhook", async (req, res) => {
     const chatId = message.chat.id;
     const userId = message.from.id; // agent Telegram ID
     const text = message.text;
+    const now = Date.now();
 
     console.log("Incoming message:", text);
 
@@ -73,12 +84,18 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    const normalized = normalizeText(text);
-    const dedupKey = `${userId}|${normalized}`;
-    const now = Date.now();
+    /* ---------------------------
+       TOPIC + DEDUP KEY
+    ---------------------------- */
+    const topic = detectTopic(text);
+    const dedupKey = `${userId}|${topic}`;
+
+    const lastEscalation = escalationCache.get(dedupKey);
+    const withinCooldown =
+      lastEscalation && now - lastEscalation < DEDUP_WINDOW_MS;
 
     /* ---------------------------
-       OPENAI DECISION
+       OPENAI DECISION (STRUCTURE ONLY)
     ---------------------------- */
     const openaiResponse = await fetch(
       "https://api.openai.com/v1/chat/completions",
@@ -93,7 +110,7 @@ app.post("/webhook", async (req, res) => {
           messages: [
             {
               role: "system",
-              content: `You MUST output in the required escalation format.`
+              content: "Return escalation decision in required format."
             },
             { role: "user", content: text }
           ],
@@ -114,35 +131,38 @@ app.post("/webhook", async (req, res) => {
     };
 
     const ESCALATE = get("ESCALATE");
-    const USER_REPLY = get("USER_REPLY") || "Acknowledged. Stand by.";
+    const USER_REPLY = get("USER_REPLY");
     const DM_TO_CHRIS = get("DM_TO_CHRIS");
 
     /* ---------------------------
-       Public reply
+       PUBLIC REPLY (SILENT IF NONE)
     ---------------------------- */
-    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: USER_REPLY
-      })
-    });
+    if (USER_REPLY && USER_REPLY !== "NONE") {
+      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: USER_REPLY
+        })
+      });
+    } else {
+      console.log("No public reply (silent)");
+    }
 
     /* ---------------------------
-       Escalation (DEDUPED)
+       ESCALATION (LEVEL 2 DEDUP)
     ---------------------------- */
     if (ESCALATE === "YES") {
-      const lastEscalation = escalationCache.get(dedupKey);
-
-      if (lastEscalation && now - lastEscalation < DEDUP_WINDOW_MS) {
-        console.log("Escalation suppressed (duplicate)");
+      if (withinCooldown) {
+        console.log(
+          `Escalation suppressed (agent + topic cooldown): ${dedupKey}`
+        );
         return res.sendStatus(200);
       }
 
       escalationCache.set(dedupKey, now);
-
-      console.log("ESCALATION SENT");
+      console.log("ESCALATION SENT:", dedupKey);
 
       await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
         method: "POST",
