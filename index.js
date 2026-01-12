@@ -13,59 +13,38 @@ const PORT = process.env.PORT || 3000;
    LEVEL 2 DEDUP — Agent + Topic + Time Window
 ------------------------------------------------- */
 const escalationCache = new Map();
-const DEDUP_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
+const DEDUP_WINDOW_MS = 24 * 60 * 60 * 1000;
 
-// Simple rule-based topic detection (NO AI yet)
+/* ---------------------------
+   Topic detection (rule-based)
+---------------------------- */
 const detectTopic = (text) => {
   const t = text.toLowerCase();
-
-  if (t.includes("annuity") || t.includes("500k") || t.includes("$")) {
-    return "high_value_annuity";
-  }
-  if (t.includes("replacement") || t.includes("1035")) {
-    return "replacement_case";
-  }
-  if (t.includes("first appointment")) {
-    return "first_appointment";
-  }
-
+  if (t.includes("annuity") || t.includes("$")) return "high_value";
+  if (t.includes("replacement") || t.includes("1035")) return "replacement";
   return "general";
 };
 
 /* ---------------------------
-   SOP STEP 4 — GATING
+   GATING
 ---------------------------- */
 const shouldRespond = (text) => {
   const t = text.toLowerCase();
-
-  const highRisk = ["annuity", "replacement", "rollover", "ira", "401k", "$"];
-  if (highRisk.some(p => t.includes(p))) return true;
-
+  if (["annuity","replacement","rollover","ira","401k","$"].some(p => t.includes(p))) return true;
   if (t.includes("?")) return true;
-
-  const starts = [
-    "how", "what", "when", "where", "who",
-    "can you", "should i", "help", "next step"
-  ];
-  if (starts.some(p => t.startsWith(p))) return true;
-
-  const contains = [
-    "need", "stuck", "blocked",
-    "does anyone know", "i can't",
-    "urgent", "not sure what to do"
-  ];
-  return contains.some(p => t.includes(p));
+  if (["help","need","stuck","blocked","urgent","not sure"].some(p => t.includes(p))) return true;
+  return false;
 };
 
 /* ---------------------------
-   Health Check
+   Health
 ---------------------------- */
 app.get("/", (_, res) => {
   res.send("MFG Office Bot is running ✅");
 });
 
 /* ---------------------------
-   Telegram Webhook
+   Webhook
 ---------------------------- */
 app.post("/webhook", async (req, res) => {
   try {
@@ -77,20 +56,13 @@ app.post("/webhook", async (req, res) => {
     const text = message.text;
     const now = Date.now();
 
-    console.log("Incoming message:", text);
-
-    if (!shouldRespond(text)) {
-      console.log("Ignored (chatter)");
-      return res.sendStatus(200);
-    }
+    if (!shouldRespond(text)) return res.sendStatus(200);
 
     /* ---------------------------
-       AGENT ATTRIBUTION (SYSTEM DATA)
+       Agent attribution
     ---------------------------- */
     const agentName = message.from.first_name || "Unknown";
-    const agentUsername = message.from.username
-      ? `@${message.from.username}`
-      : "(no username)";
+    const agentUsername = message.from.username ? `@${message.from.username}` : "(no username)";
     const groupName = message.chat.title || "Private Chat";
     const timestamp = new Date(message.date * 1000).toLocaleString();
 
@@ -103,93 +75,103 @@ Message:
 `;
 
     /* ---------------------------
-       TOPIC + DEDUP KEY
+       Dedup key
     ---------------------------- */
     const topic = detectTopic(text);
     const dedupKey = `${userId}|${topic}`;
-
     const lastEscalation = escalationCache.get(dedupKey);
-    const withinCooldown =
-      lastEscalation && now - lastEscalation < DEDUP_WINDOW_MS;
+    const withinCooldown = lastEscalation && now - lastEscalation < DEDUP_WINDOW_MS;
 
     /* ---------------------------
-       OPENAI DECISION (STRUCTURE ONLY)
+       AI SYSTEM PROMPT (ENFORCED)
     ---------------------------- */
-    const openaiResponse = await fetch(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${OPENAI_API_KEY}`
-        },
-        body: JSON.stringify({
-          model: "gpt-4.1-mini",
-          messages: [
-            {
-              role: "system",
-              content: "Return escalation decision in required format."
-            },
-            { role: "user", content: text }
-          ],
-          temperature: 0
-        })
-      }
-    );
+    const systemPrompt = `
+You are an INTERNAL office AI. You do NOT give product, legal, or tax advice.
 
-    const data = await openaiResponse.json();
-    const output = data?.choices?.[0]?.message?.content;
+You MUST choose a MODE:
+- ANSWER: safe, procedural, short
+- CLARIFY: missing info (ask 1–2 questions max)
+- ESCALATE: risk, compliance, high value, uncertainty
+
+You MUST set CONFIDENCE:
+- HIGH if you are certain and safe
+- LOW if unsure → escalation required
+
+OUTPUT FORMAT (STRICT):
+
+MODE: ANSWER | CLARIFY | ESCALATE
+CONFIDENCE: HIGH | LOW
+USER_REPLY:
+<short reply OR NONE>
+DM_TO_CHRIS:
+<only if MODE=ESCALATE or CONFIDENCE=LOW, else NONE>
+`;
+
+    const aiRes = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: "gpt-4.1-mini",
+        temperature: 0,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: text }
+        ]
+      })
+    });
+
+    const aiData = await aiRes.json();
+    const output = aiData?.choices?.[0]?.message?.content;
     if (!output) return res.sendStatus(200);
 
     const get = (label) => {
-      const match = output.match(
-        new RegExp(`${label}:([\\s\\S]*?)(?=\\n[A-Z_]+:|$)`)
-      );
-      return match ? match[1].trim() : "NONE";
+      const m = output.match(new RegExp(`${label}:([\\s\\S]*?)(?=\\n[A-Z_]+:|$)`));
+      return m ? m[1].trim() : null;
     };
 
-    const ESCALATE = get("ESCALATE");
+    const MODE = get("MODE");
+    const CONFIDENCE = get("CONFIDENCE");
     const USER_REPLY = get("USER_REPLY");
     const DM_TO_CHRIS = get("DM_TO_CHRIS");
 
     /* ---------------------------
-       PUBLIC REPLY (SILENT IF NONE)
+       ENFORCEMENT
     ---------------------------- */
-    if (USER_REPLY && USER_REPLY !== "NONE") {
+    const mustEscalate =
+      MODE === "ESCALATE" ||
+      CONFIDENCE === "LOW" ||
+      !MODE ||
+      !CONFIDENCE;
+
+    /* ---------------------------
+       Public reply (only if allowed)
+    ---------------------------- */
+    if (!mustEscalate && USER_REPLY && USER_REPLY !== "NONE") {
       await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: USER_REPLY
-        })
+        body: JSON.stringify({ chat_id: chatId, text: USER_REPLY })
       });
-    } else {
-      console.log("No public reply (silent / seen behavior)");
     }
 
     /* ---------------------------
-       ESCALATION (LEVEL 2 DEDUP + ATTRIBUTION)
+       Escalation
     ---------------------------- */
-    if (ESCALATE === "YES") {
-      if (withinCooldown) {
-        console.log(
-          `Escalation suppressed (agent + topic cooldown): ${dedupKey}`
-        );
-        return res.sendStatus(200);
+    if (mustEscalate) {
+      if (!withinCooldown) {
+        escalationCache.set(dedupKey, now);
+        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: Number(CHRIS_TELEGRAM_ID),
+            text: `${attributionBlock}\n\n${DM_TO_CHRIS || "Escalation triggered due to low confidence or risk."}`
+          })
+        });
       }
-
-      escalationCache.set(dedupKey, now);
-      console.log("ESCALATION SENT:", dedupKey);
-
-      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: Number(CHRIS_TELEGRAM_ID),
-          text: `${attributionBlock}\n\n${DM_TO_CHRIS}`
-        })
-      });
     }
 
     return res.sendStatus(200);
@@ -201,7 +183,7 @@ Message:
 });
 
 /* ---------------------------
-   Start Server
+   Start
 ---------------------------- */
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
