@@ -10,13 +10,26 @@ const CHRIS_TELEGRAM_ID = process.env.CHRIS_TELEGRAM_ID;
 const PORT = process.env.PORT || 3000;
 
 /* ---------------------------
-   SOP STEP 4 — GATING (FIXED)
+   Escalation Dedup Memory
+---------------------------- */
+const escalatedCases = new Map();
+const ESCALATION_TTL_MS = 24 * 60 * 60 * 1000;
+
+const normalizeText = (text) =>
+  text
+    .toLowerCase()
+    .replace(/\$[\d,]+/g, "$AMOUNT")
+    .replace(/\d+/g, "N")
+    .replace(/\s+/g, " ")
+    .trim();
+
+/* ---------------------------
+   SOP STEP 4 — GATING
 ---------------------------- */
 const shouldRespond = (text) => {
   if (!text) return false;
   const t = text.toLowerCase().trim();
 
-  // High-risk keywords → always respond
   const highRisk = [
     "annuity",
     "replacement",
@@ -28,10 +41,8 @@ const shouldRespond = (text) => {
   ];
   if (highRisk.some(p => t.includes(p))) return true;
 
-  // Explicit question mark
   if (t.includes("?")) return true;
 
-  // Strong starters (phrase-aware)
   const starters = [
     "how",
     "how do i",
@@ -47,12 +58,8 @@ const shouldRespond = (text) => {
     "next step",
     "next steps"
   ];
+  if (starters.some(p => t === p || t.startsWith(p + " "))) return true;
 
-  if (starters.some(p => t === p || t.startsWith(p + " "))) {
-    return true;
-  }
-
-  // Explicit help / stuck language
   const contains = [
     "need help",
     "need to",
@@ -64,7 +71,6 @@ const shouldRespond = (text) => {
     "not sure what to do",
     "what should i do"
   ];
-
   return contains.some(p => t.includes(p));
 };
 
@@ -85,8 +91,14 @@ app.post("/webhook", async (req, res) => {
 
     const chatId = message.chat.id;
     const text = message.text;
+    const user = message.from;
 
-    console.log("Incoming Telegram message:", text);
+    const agentName = `${user.first_name || ""} ${user.last_name || ""}`.trim();
+    const agentUsername = user.username ? `@${user.username}` : "no_username";
+    const agentLabel = `${agentName} (${agentUsername})`;
+
+    console.log("Incoming message from:", agentLabel);
+    console.log("Message:", text);
 
     if (!shouldRespond(text)) {
       console.log("Ignored (gating)");
@@ -133,16 +145,13 @@ EMAIL_TO_CHRIS:
 
     const data = await openaiResponse.json();
     if (!data.choices?.[0]) {
-      console.error("OpenAI response malformed:", data);
+      console.error("Malformed OpenAI response:", data);
       return res.sendStatus(200);
     }
 
     const output = data.choices[0].message.content;
-    console.log("OpenAI raw output:\n", output);
+    console.log("OpenAI output:\n", output);
 
-    /* ---------------------------
-       PARSE MODEL OUTPUT
-    ---------------------------- */
     const get = (label) => {
       const match = output.match(
         new RegExp(`${label}:([\\s\\S]*?)(?=\\n[A-Z_]+:|$)`)
@@ -152,43 +161,50 @@ EMAIL_TO_CHRIS:
 
     const ESCALATE = get("ESCALATE");
     const USER_REPLY = get("USER_REPLY");
+    const DM_TO_CHRIS = get("DM_TO_CHRIS");
 
-    // If model says nothing → stay silent
-    if (!USER_REPLY || USER_REPLY === "NONE") {
-      console.log("No public reply required");
-      return res.sendStatus(200);
+    /* ---------------------------
+       Public reply (if any)
+    ---------------------------- */
+    if (USER_REPLY && USER_REPLY !== "NONE") {
+      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: USER_REPLY
+        })
+      });
+      console.log("Public reply sent");
     }
 
     /* ---------------------------
-       Public reply
+       Escalation Dedup + DM
     ---------------------------- */
-    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: USER_REPLY
-      })
-    });
+    if (ESCALATE === "YES" && CHRIS_TELEGRAM_ID && DM_TO_CHRIS && DM_TO_CHRIS !== "NONE") {
+      const dedupKey = `${chatId}:${normalizeText(text)}`;
+      const now = Date.now();
+      const last = escalatedCases.get(dedupKey);
 
-    console.log("Bot replied successfully");
-
-    /* ---------------------------
-       Escalation (Telegram only)
-    ---------------------------- */
-    if (ESCALATE === "YES" && CHRIS_TELEGRAM_ID) {
-      const DM_TO_CHRIS = get("DM_TO_CHRIS");
-      if (DM_TO_CHRIS && DM_TO_CHRIS !== "NONE") {
-        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            chat_id: Number(CHRIS_TELEGRAM_ID),
-            text: DM_TO_CHRIS
-          })
-        });
-        console.log("Escalation DM sent");
+      if (last && now - last < ESCALATION_TTL_MS) {
+        console.log("Escalation skipped (duplicate case)");
+        return res.sendStatus(200);
       }
+
+      escalatedCases.set(dedupKey, now);
+
+      const dmText = `🚨 Escalation from ${agentLabel}\n\n${DM_TO_CHRIS}`;
+
+      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: Number(CHRIS_TELEGRAM_ID),
+          text: dmText
+        })
+      });
+
+      console.log("Escalation DM sent to Chris");
     }
 
     return res.sendStatus(200);
