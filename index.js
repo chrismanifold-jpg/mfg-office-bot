@@ -210,7 +210,8 @@ app.post("/webhook", async (req, res) => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           chat_id: Number(CHRIS_TELEGRAM_ID),
-          text: `📚 KB GAP\n\nAgent: ${agentLabel}\nQuestion:\n"${text}"`
+          text: `📚 KB GAP\n\nAgent: ${agentLabel}\nQuestion:\n"${text}\n Hey Chris I don't know how to answer this one, can you reach back to the group to solve this concern?\n
+          However what I need is a approve SOP for this concern so it can be add to my knowledge base by Jodie"`
         })
       });
 
