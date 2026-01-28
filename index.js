@@ -192,7 +192,8 @@ Question:
 "${text}"
 
 Action needed:
-Hey Chris, I don't know how to answer this one, can you reach back to the group and answer this concern? However it will be sent to Jodie to add in drive, what I need from you is to
+Hey Chris, I don't know how to answer this one, can you reach back to the group and answer this concern?
+However it will be sent to Jodie to add in drive, what I need from you is to
 Create or approve an SOP for this topic and add it to the MFG_AI_Knowledge_Base.
 `;
 
