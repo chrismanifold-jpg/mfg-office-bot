@@ -24,6 +24,59 @@ const normalizeText = (text) =>
     .trim();
 
 /* ---------------------------
+   RAG — SOP REGISTRY
+---------------------------- */
+const SOP_LIBRARY = [
+  {
+    id: "contracting",
+    title: "SOP – Contracting Checklist",
+    keywords: [
+      "contracting",
+      "agent agreement",
+      "arc",
+      "naa",
+      "carrier contracting",
+      "w-9",
+      "licenses",
+      "tax document"
+    ],
+    content: `
+PURPOSE:
+Guide agents through the contracting process.
+
+STEPS:
+1. Log in to Training Portals:
+   - https://www.tristategrp.com
+   - https://naauniversity.com/login/
+2. Complete required training modules
+3. Complete ARC checklist:
+   - Agent Agreement
+   - Licenses
+   - W-9
+   - Carrier Contracting
+   - Personal Use Policy
+   - ARC Deposit
+
+COMMON ISSUES:
+- No email received
+- License rejected
+- Portal access error
+
+ESCALATE IF:
+- No portal access after 48 hours
+- Licensing issue blocks submission
+`
+  }
+];
+
+const findMatchingSOP = (text) => {
+  const t = text.toLowerCase();
+  return SOP_LIBRARY.find(sop =>
+    sop.keywords.some(k => t.includes(k))
+  );
+};
+
+/* ---------------------------
    SOP STEP 4 — GATING
 ---------------------------- */
 const shouldRespond = (text) => {
@@ -106,18 +159,47 @@ app.post("/webhook", async (req, res) => {
     }
 
     /* ---------------------------
-       SOP STEP 5 — OPENAI DECISION
+       RAG — SOP ENFORCEMENT
+    ---------------------------- */
+    const matchedSOP = findMatchingSOP(text);
+
+    if (!matchedSOP) {
+      console.log("No SOP match — refusing to answer");
+
+      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text:
+            "Wala pa akong approved SOP para sa tanong na ito. " +
+            "Please message Jodie so we can add this to the knowledge base."
+        })
+      });
+
+      return res.sendStatus(200);
+    }
+
+    /* ---------------------------
+       SOP STEP 5 — OPENAI (RAG SAFE)
     ---------------------------- */
     const systemInstructions = `
 You are the internal AI assistant for Manifold Financial Group.
 
-You MUST output in this exact structure every time:
+You may ONLY answer using the approved SOP below.
+Do NOT add information not found in the SOP.
+If the SOP does not fully answer the question, escalate.
+
+APPROVED SOP:
+${matchedSOP.content}
+
+OUTPUT FORMAT (STRICT):
 
 ESCALATE: <YES/NO>
 ESCALATE_REASON: <short reason or NONE>
 EXPECTED_COMMISSION_USD: <number or UNKNOWN>
 USER_REPLY:
-<short, action-forcing response>
+<short, action-forcing response based ONLY on SOP>
 DM_TO_CHRIS:
 <only if ESCALATE=YES, else NONE>
 EMAIL_TO_CHRIS:
@@ -163,9 +245,6 @@ EMAIL_TO_CHRIS:
     const USER_REPLY = get("USER_REPLY");
     const DM_TO_CHRIS = get("DM_TO_CHRIS");
 
-    /* ---------------------------
-       Public reply (if any)
-    ---------------------------- */
     if (USER_REPLY && USER_REPLY !== "NONE") {
       await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
         method: "POST",
@@ -175,36 +254,25 @@ EMAIL_TO_CHRIS:
           text: USER_REPLY
         })
       });
-      console.log("Public reply sent");
     }
 
-    /* ---------------------------
-       Escalation Dedup + DM
-    ---------------------------- */
     if (ESCALATE === "YES" && CHRIS_TELEGRAM_ID && DM_TO_CHRIS && DM_TO_CHRIS !== "NONE") {
       const dedupKey = `${chatId}:${normalizeText(text)}`;
       const now = Date.now();
       const last = escalatedCases.get(dedupKey);
 
-      if (last && now - last < ESCALATION_TTL_MS) {
-        console.log("Escalation skipped (duplicate case)");
-        return res.sendStatus(200);
+      if (!last || now - last > ESCALATION_TTL_MS) {
+        escalatedCases.set(dedupKey, now);
+
+        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: Number(CHRIS_TELEGRAM_ID),
+            text: `🚨 Escalation from ${agentLabel}\n\n${DM_TO_CHRIS}`
+          })
+        });
       }
-
-      escalatedCases.set(dedupKey, now);
-
-      const dmText = `🚨 Escalation from ${agentLabel}\n\n${DM_TO_CHRIS}`;
-
-      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: Number(CHRIS_TELEGRAM_ID),
-          text: dmText
-        })
-      });
-
-      console.log("Escalation DM sent to Chris");
     }
 
     return res.sendStatus(200);
