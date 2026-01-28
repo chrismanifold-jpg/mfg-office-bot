@@ -10,6 +10,12 @@ const CHRIS_TELEGRAM_ID = process.env.CHRIS_TELEGRAM_ID;
 const PORT = process.env.PORT || 3000;
 
 /* ---------------------------
+   Constants
+---------------------------- */
+const KB_MISS_REPLY =
+  "This question isn’t in my approved knowledge base yet. I’ll escalate this to Chris for review.";
+
+/* ---------------------------
    Escalation Dedup Memory
 ---------------------------- */
 const escalatedCases = new Map();
@@ -71,8 +77,8 @@ ESCALATE IF:
 
 const findMatchingSOP = (text) => {
   const t = text.toLowerCase();
-  return SOP_LIBRARY.find(sop =>
-    sop.keywords.some(k => t.includes(k))
+  return SOP_LIBRARY.find((sop) =>
+    sop.keywords.some((k) => t.includes(k))
   );
 };
 
@@ -92,7 +98,7 @@ const shouldRespond = (text) => {
     "$",
     "commission"
   ];
-  if (highRisk.some(p => t.includes(p))) return true;
+  if (highRisk.some((p) => t.includes(p))) return true;
 
   if (t.includes("?")) return true;
 
@@ -111,7 +117,7 @@ const shouldRespond = (text) => {
     "next step",
     "next steps"
   ];
-  if (starters.some(p => t === p || t.startsWith(p + " "))) return true;
+  if (starters.some((p) => t === p || t.startsWith(p + " "))) return true;
 
   const contains = [
     "need help",
@@ -124,7 +130,7 @@ const shouldRespond = (text) => {
     "not sure what to do",
     "what should i do"
   ];
-  return contains.some(p => t.includes(p));
+  return contains.some((p) => t.includes(p));
 };
 
 /* ---------------------------
@@ -164,17 +170,42 @@ app.post("/webhook", async (req, res) => {
     const matchedSOP = findMatchingSOP(text);
 
     if (!matchedSOP) {
-      console.log("No SOP match — refusing to answer");
+      console.log("No SOP match — KB gap detected");
 
+      // Public reply
       await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           chat_id: chatId,
-          text:
-            "This question isn’t in my approved knowledge base yet. I’ll escalate this to Chris for review."
+          text: KB_MISS_REPLY
         })
       });
+
+      // DM Chris (knowledge-base gap alert)
+      if (CHRIS_TELEGRAM_ID) {
+        const kbAlert = `
+📚 Knowledge Base Gap Detected
+
+Agent: ${agentLabel}
+Question:
+"${text}"
+
+Action needed:
+Create or approve an SOP for this topic and add it to the MFG_AI_Knowledge_Base.
+`;
+
+        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: Number(CHRIS_TELEGRAM_ID),
+            text: kbAlert
+          })
+        });
+
+        console.log("KB gap DM sent to Chris");
+      }
 
       return res.sendStatus(200);
     }
@@ -211,7 +242,7 @@ EMAIL_TO_CHRIS:
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${OPENAI_API_KEY}`
+          Authorization: `Bearer ${OPENAI_API_KEY}`
         },
         body: JSON.stringify({
           model: "gpt-4.1-mini",
@@ -225,13 +256,9 @@ EMAIL_TO_CHRIS:
     );
 
     const data = await openaiResponse.json();
-    if (!data.choices?.[0]) {
-      console.error("Malformed OpenAI response:", data);
-      return res.sendStatus(200);
-    }
+    if (!data.choices?.[0]) return res.sendStatus(200);
 
     const output = data.choices[0].message.content;
-    console.log("OpenAI output:\n", output);
 
     const get = (label) => {
       const match = output.match(
