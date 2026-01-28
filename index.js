@@ -30,6 +30,20 @@ const normalizeText = (text) =>
     .trim();
 
 /* ---------------------------
+   HARD ESCALATION DETECTOR
+---------------------------- */
+const isHardEscalation = (text) => {
+  const t = text.toLowerCase();
+  return (
+    t.includes("annuity") ||
+    t.includes("replacement") ||
+    t.includes("rollover") ||
+    t.includes("commission") ||
+    /\$\s?\d{2,}/.test(t)
+  );
+};
+
+/* ---------------------------
    RAG — SOP REGISTRY
 ---------------------------- */
 const SOP_LIBRARY = [
@@ -63,11 +77,6 @@ STEPS:
    - Personal Use Policy
    - ARC Deposit
 
-COMMON ISSUES:
-- No email received
-- License rejected
-- Portal access error
-
 ESCALATE IF:
 - No portal access after 48 hours
 - Licensing issue blocks submission
@@ -77,8 +86,8 @@ ESCALATE IF:
 
 const findMatchingSOP = (text) => {
   const t = text.toLowerCase();
-  return SOP_LIBRARY.find((sop) =>
-    sop.keywords.some((k) => t.includes(k))
+  return SOP_LIBRARY.find(sop =>
+    sop.keywords.some(k => t.includes(k))
   );
 };
 
@@ -88,17 +97,6 @@ const findMatchingSOP = (text) => {
 const shouldRespond = (text) => {
   if (!text) return false;
   const t = text.toLowerCase().trim();
-
-  const highRisk = [
-    "annuity",
-    "replacement",
-    "rollover",
-    "ira",
-    "401k",
-    "$",
-    "commission"
-  ];
-  if (highRisk.some((p) => t.includes(p))) return true;
 
   if (t.includes("?")) return true;
 
@@ -117,20 +115,18 @@ const shouldRespond = (text) => {
     "next step",
     "next steps"
   ];
-  if (starters.some((p) => t === p || t.startsWith(p + " "))) return true;
+
+  if (starters.some(p => t === p || t.startsWith(p + " "))) return true;
 
   const contains = [
     "need help",
-    "need to",
     "stuck",
     "blocked",
-    "does anyone know",
     "i can't",
-    "urgent",
-    "not sure what to do",
-    "what should i do"
+    "not sure what to do"
   ];
-  return contains.some((p) => t.includes(p));
+
+  return contains.some(p => t.includes(p));
 };
 
 /* ---------------------------
@@ -156,11 +152,41 @@ app.post("/webhook", async (req, res) => {
     const agentUsername = user.username ? `@${user.username}` : "no_username";
     const agentLabel = `${agentName} (${agentUsername})`;
 
-    console.log("Incoming message from:", agentLabel);
-    console.log("Message:", text);
+    console.log("Incoming:", agentLabel, text);
 
-    if (!shouldRespond(text)) {
-      console.log("Ignored (gating)");
+    if (!shouldRespond(text)) return res.sendStatus(200);
+
+    /* ---------------------------
+       HARD ESCALATION (BYPASS RAG)
+    ---------------------------- */
+    if (isHardEscalation(text)) {
+      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text:
+            "This looks like a high-risk or high-value case. I’m escalating this to Chris for guidance."
+        })
+      });
+
+      const dedupKey = `${chatId}:${normalizeText(text)}`;
+      const now = Date.now();
+      const last = escalatedCases.get(dedupKey);
+
+      if (!last || now - last > ESCALATION_TTL_MS) {
+        escalatedCases.set(dedupKey, now);
+
+        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: Number(CHRIS_TELEGRAM_ID),
+            text: `🚨 CASE ESCALATION\n\nAgent: ${agentLabel}\nQuestion:\n"${text}"`
+          })
+        });
+      }
+
       return res.sendStatus(200);
     }
 
@@ -170,9 +196,6 @@ app.post("/webhook", async (req, res) => {
     const matchedSOP = findMatchingSOP(text);
 
     if (!matchedSOP) {
-      console.log("No SOP match — KB gap detected");
-
-      // Public reply
       await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -182,60 +205,34 @@ app.post("/webhook", async (req, res) => {
         })
       });
 
-      // DM Chris (knowledge-base gap alert)
-      if (CHRIS_TELEGRAM_ID) {
-        const kbAlert = `
-📚 Knowledge Base Gap Detected
-
-Agent: ${agentLabel}
-Question:
-"${text}"
-
-Action needed:
-Hey Chris, I don't know how to answer this one, can you reach back to the group and answer this concern?
-However it will be sent to Jodie to add in drive, what I need from you is to
-Create or approve an SOP for this topic and add it to the MFG_AI_Knowledge_Base.
-`;
-
-        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            chat_id: Number(CHRIS_TELEGRAM_ID),
-            text: kbAlert
-          })
-        });
-
-        console.log("KB gap DM sent to Chris");
-      }
+      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: Number(CHRIS_TELEGRAM_ID),
+          text: `📚 KB GAP\n\nAgent: ${agentLabel}\nQuestion:\n"${text}"`
+        })
+      });
 
       return res.sendStatus(200);
     }
 
     /* ---------------------------
-       SOP STEP 5 — OPENAI (RAG SAFE)
+       OPENAI (RAG SAFE)
     ---------------------------- */
     const systemInstructions = `
-You are the internal AI assistant for Manifold Financial Group.
-
-You may ONLY answer using the approved SOP below.
-Do NOT add information not found in the SOP.
-If the SOP does not fully answer the question, escalate.
+You may ONLY answer using the SOP below.
+If insufficient, escalate.
 
 APPROVED SOP:
 ${matchedSOP.content}
 
-OUTPUT FORMAT (STRICT):
-
-ESCALATE: <YES/NO>
-ESCALATE_REASON: <short reason or NONE>
-EXPECTED_COMMISSION_USD: <number or UNKNOWN>
+OUTPUT:
 USER_REPLY:
-<short, action-forcing response based ONLY on SOP>
+<short answer>
+ESCALATE: <YES/NO>
 DM_TO_CHRIS:
-<only if ESCALATE=YES, else NONE>
-EMAIL_TO_CHRIS:
-<only if ESCALATE=YES, else NONE>
+<only if YES>
 `;
 
     const openaiResponse = await fetch(
@@ -258,49 +255,18 @@ EMAIL_TO_CHRIS:
     );
 
     const data = await openaiResponse.json();
-    if (!data.choices?.[0]) return res.sendStatus(200);
+    const output = data.choices?.[0]?.message?.content || "";
 
-    const output = data.choices[0].message.content;
-
-    const get = (label) => {
-      const match = output.match(
-        new RegExp(`${label}:([\\s\\S]*?)(?=\\n[A-Z_]+:|$)`)
-      );
-      return match ? match[1].trim() : null;
-    };
-
-    const ESCALATE = get("ESCALATE");
-    const USER_REPLY = get("USER_REPLY");
-    const DM_TO_CHRIS = get("DM_TO_CHRIS");
-
-    if (USER_REPLY && USER_REPLY !== "NONE") {
+    const replyMatch = output.match(/USER_REPLY:\s*([\s\S]*)/);
+    if (replyMatch) {
       await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           chat_id: chatId,
-          text: USER_REPLY
+          text: replyMatch[1].trim()
         })
       });
-    }
-
-    if (ESCALATE === "YES" && CHRIS_TELEGRAM_ID && DM_TO_CHRIS && DM_TO_CHRIS !== "NONE") {
-      const dedupKey = `${chatId}:${normalizeText(text)}`;
-      const now = Date.now();
-      const last = escalatedCases.get(dedupKey);
-
-      if (!last || now - last > ESCALATION_TTL_MS) {
-        escalatedCases.set(dedupKey, now);
-
-        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            chat_id: Number(CHRIS_TELEGRAM_ID),
-            text: `🚨 Escalation from ${agentLabel}\n\n${DM_TO_CHRIS}`
-          })
-        });
-      }
     }
 
     return res.sendStatus(200);
