@@ -172,8 +172,7 @@ app.post("/webhook", async (req, res) => {
         body: JSON.stringify({
           chat_id: chatId,
           text:
-            "Wala pa akong approved SOP para sa tanong na ito. " +
-            "Please message Jodie so we can add this to the knowledge base."
+            "This question isn’t in my approved knowledge base yet. I’ll escalate this to Chris for review."
         })
       });
 
