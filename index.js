@@ -25,23 +25,9 @@ const sendDMToChris = async (text) => {
 };
 
 /* ---------------------------
-   Memory (conversation state)
+   Conversation State (REQUIRED)
 ---------------------------- */
-const pendingState = new Map();
-
-/* ---------------------------
-   Gating
----------------------------- */
-const shouldRespond = (text) => {
-  if (!text) return false;
-  const t = text.toLowerCase();
-  return (
-    t.includes("?") ||
-    ["how", "sign", "contract", "agreement", "arc", "stuck", "not sure"].some(k =>
-      t.includes(k)
-    )
-  );
-};
+const pendingState = new Map(); // chatId -> state
 
 /* ---------------------------
    Hard Escalation
@@ -73,20 +59,18 @@ app.post("/webhook", async (req, res) => {
     if (!msg || !msg.text) return res.sendStatus(200);
 
     const chatId = msg.chat.id;
-    const text = msg.text.trim();
-    const t = text.toLowerCase();
+    const rawText = msg.text;
+    const text = rawText.trim().toLowerCase();
     const user = msg.from;
 
     const agentName = `${user.first_name || ""} ${user.last_name || ""}`.trim();
     const agentUsername = user.username ? `@${user.username}` : "no_username";
     const agentLabel = `${agentName} (${agentUsername})`;
 
-    console.log("Incoming:", agentLabel, text);
-
-    if (!shouldRespond(text)) return res.sendStatus(200);
+    console.log("Incoming:", agentLabel, rawText);
 
     /* ---------------------------
-       HARD ESCALATION FIRST
+       HARD ESCALATION (FIRST)
     ---------------------------- */
     if (isHardEscalation(text)) {
       await sendMessage(
@@ -95,33 +79,31 @@ app.post("/webhook", async (req, res) => {
       );
 
       await sendDMToChris(
-        `🚨 HIGH-RISK CASE\nAgent: ${agentLabel}\nQuestion:\n"${text}"`
+        `🚨 HIGH-RISK CASE\nAgent: ${agentLabel}\nQuestion:\n"${rawText}"`
       );
 
       return res.sendStatus(200);
     }
 
     /* ---------------------------
-       PENDING STATE HANDLER
+       STATE HANDLER (CRITICAL)
     ---------------------------- */
-    const pending = pendingState.get(chatId);
+    const state = pendingState.get(chatId);
 
-    // STEP 2: ARC ACCESS CONFIRMATION
-    if (pending === "ARC_ACCESS") {
-      const isYes = ["yes", "have", "already"].some(k => t.includes(k));
-      const isNo = ["no", "none", "no access", "don't", "dont"].some(k =>
-        t.includes(k)
-      );
+    // === ARC ACCESS CONFIRMATION ===
+    if (state === "ARC_ACCESS") {
+      const yesAnswers = ["yes", "yep", "yeah", "i do", "have access"];
+      const noAnswers = ["no", "no access", "none", "don’t", "dont"];
 
-      if (isNo) {
+      if (noAnswers.some(a => text === a || text.includes(a))) {
         pendingState.delete(chatId);
 
         await sendMessage(
           chatId,
           "You’ll need ARC access first.\n\n" +
-            "1. Go to https://arc.naaleads.com\n" +
-            "2. Log in using your NAA credentials\n\n" +
-            "If you didn’t receive access or can’t log in, email contracting@naaleads.com."
+          "1. Go to https://arc.naaleads.com\n" +
+          "2. Log in using your NAA credentials\n\n" +
+          "If you didn’t receive access or can’t log in, email contracting@naaleads.com."
         );
 
         await sendDMToChris(
@@ -131,52 +113,53 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      if (isYes) {
+      if (yesAnswers.some(a => text === a || text.includes(a))) {
         pendingState.delete(chatId);
+        pendingState.set(chatId, "CONTRACT_STAGE");
 
         await sendMessage(
           chatId,
           "Which part are you currently on?\n" +
-            "• Haven’t started contracting\n" +
-            "• Submitted contracting requests\n" +
-            "• Waiting for carrier approval\n" +
-            "• Not sure / stuck"
+          "• Haven’t started contracting\n" +
+          "• Submitted contracting requests\n" +
+          "• Waiting for carrier approval\n" +
+          "• Not sure / stuck"
         );
 
-        pendingState.set(chatId, "CONTRACT_STAGE");
         return res.sendStatus(200);
       }
 
       await sendMessage(
         chatId,
-        "Just to confirm — do you have ARC access? Please reply yes or no."
+        "Please reply with **yes** or **no** so I can guide you correctly."
       );
+
       return res.sendStatus(200);
     }
 
-    // STEP 3: CONTRACTING STAGE
-    if (pending === "CONTRACT_STAGE") {
+    // === CONTRACT STAGE ===
+    if (state === "CONTRACT_STAGE") {
       pendingState.delete(chatId);
 
-      if (t.includes("haven’t") || t.includes("not started")) {
+      if (text.includes("haven’t") || text.includes("not started")) {
         await sendMessage(
           chatId,
           "Next steps:\n" +
-            "1. Log in to ARC\n" +
-            "2. Click My Business → Contracting\n" +
-            "3. Select Contracting Request\n" +
-            "4. Start with recommended carriers only."
+          "1. Log in to ARC\n" +
+          "2. Click My Business → Contracting\n" +
+          "3. Select Contracting Request\n" +
+          "4. Start with recommended carriers only."
         );
         return res.sendStatus(200);
       }
 
-      if (t.includes("submitted")) {
+      if (text.includes("submitted")) {
         await sendMessage(
           chatId,
           "To check your status:\n" +
-            "1. Go to ARC\n" +
-            "2. Open Contracting → My Contracts\n" +
-            "3. Review carrier approval status."
+          "1. Go to ARC\n" +
+          "2. Open Contracting → My Contracts\n" +
+          "3. Review carrier approval status."
         );
         return res.sendStatus(200);
       }
@@ -187,22 +170,23 @@ app.post("/webhook", async (req, res) => {
       );
 
       await sendDMToChris(
-        `⚠️ CONTRACTING STUCK\nAgent: ${agentLabel}\nStage:\n"${text}"`
+        `⚠️ CONTRACTING STUCK\nAgent: ${agentLabel}\nResponse:\n"${rawText}"`
       );
 
       return res.sendStatus(200);
     }
 
     /* ---------------------------
-       STEP 1: CONTRACT QUESTION
+       ENTRY POINT
     ---------------------------- */
-    if (t.includes("sign") && t.includes("agreement")) {
+    if (text.includes("sign") && text.includes("agreement")) {
+      pendingState.set(chatId, "ARC_ACCESS");
+
       await sendMessage(
         chatId,
-        "Quick check first — do you already have access to the ARC website using your NAA credentials?"
+        "Quick check first — do you already have access to the ARC website using your NAA credentials? (yes / no)"
       );
 
-      pendingState.set(chatId, "ARC_ACCESS");
       return res.sendStatus(200);
     }
 
@@ -211,11 +195,11 @@ app.post("/webhook", async (req, res) => {
     ---------------------------- */
     await sendMessage(
       chatId,
-      "I don’t have enough information to proceed. I’m escalating this to Chris for guidance."
+      "I’m not sure how to proceed with this yet. I’m escalating this to Chris for guidance."
     );
 
     await sendDMToChris(
-      `⚠️ UNRESOLVED QUESTION\nAgent: ${agentLabel}\nQuestion:\n"${text}"`
+      `⚠️ UNRESOLVED QUESTION\nAgent: ${agentLabel}\nQuestion:\n"${rawText}"`
     );
 
     return res.sendStatus(200);
