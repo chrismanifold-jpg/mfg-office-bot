@@ -25,9 +25,34 @@ const sendDMToChris = async (text) => {
 };
 
 /* ---------------------------
-   Conversation State (REQUIRED)
+   Conversation State
+   chatId -> { intent, step }
 ---------------------------- */
-const pendingState = new Map(); // chatId -> state
+const pendingState = new Map();
+
+/* ---------------------------
+   SOP Intent Detection
+---------------------------- */
+const getSOPIntent = (text) => {
+  const t = text.toLowerCase();
+
+  if (
+    t.includes("contract") ||
+    t.includes("agreement") ||
+    t.includes("arc")
+  ) {
+    return "CONTRACTING";
+  }
+
+  return null;
+};
+
+const clearStateIfIntentChanged = (chatId, intent) => {
+  const current = pendingState.get(chatId);
+  if (current && current.intent !== intent) {
+    pendingState.delete(chatId);
+  }
+};
 
 /* ---------------------------
    Hard Escalation
@@ -70,7 +95,7 @@ app.post("/webhook", async (req, res) => {
     console.log("Incoming:", agentLabel, rawText);
 
     /* ---------------------------
-       HARD ESCALATION (FIRST)
+       1️⃣ HARD ESCALATION (ALWAYS FIRST)
     ---------------------------- */
     if (isHardEscalation(text)) {
       await sendMessage(
@@ -86,16 +111,48 @@ app.post("/webhook", async (req, res) => {
     }
 
     /* ---------------------------
-       STATE HANDLER (CRITICAL)
+       2️⃣ SOP INTENT CHECK
     ---------------------------- */
+    const intent = getSOPIntent(text);
+    clearStateIfIntentChanged(chatId, intent);
+
+    if (!intent) {
+      await sendMessage(
+        chatId,
+        "This question isn’t in my approved knowledge base yet. I’ll escalate this to Chris for review."
+      );
+
+      await sendDMToChris(
+        `📚 KB GAP\nAgent: ${agentLabel}\nQuestion:\n"${rawText}"`
+      );
+
+      return res.sendStatus(200);
+    }
+
+    /* ============================
+       CONTRACTING SOP DECISION TREE
+       ============================ */
+
     const state = pendingState.get(chatId);
 
-    // === ARC ACCESS CONFIRMATION ===
-    if (state === "ARC_ACCESS") {
-      const yesAnswers = ["yes", "yep", "yeah", "i do", "have access"];
-      const noAnswers = ["no", "no access", "none", "don’t", "dont"];
+    /* STEP 1 — Ask ARC access */
+    if (!state) {
+      pendingState.set(chatId, { intent: "CONTRACTING", step: "ARC_ACCESS" });
 
-      if (noAnswers.some(a => text === a || text.includes(a))) {
+      await sendMessage(
+        chatId,
+        "Quick check first — do you already have access to the ARC website using your NAA credentials? (yes / no)"
+      );
+
+      return res.sendStatus(200);
+    }
+
+    /* STEP 2 — Handle ARC access */
+    if (state.step === "ARC_ACCESS") {
+      const yesAnswers = ["yes", "yep", "yeah", "have", "i do"];
+      const noAnswers = ["no", "no access", "none", "dont", "don't"];
+
+      if (noAnswers.some(a => text.includes(a))) {
         pendingState.delete(chatId);
 
         await sendMessage(
@@ -113,9 +170,8 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      if (yesAnswers.some(a => text === a || text.includes(a))) {
-        pendingState.delete(chatId);
-        pendingState.set(chatId, "CONTRACT_STAGE");
+      if (yesAnswers.some(a => text.includes(a))) {
+        pendingState.set(chatId, { intent: "CONTRACTING", step: "STAGE" });
 
         await sendMessage(
           chatId,
@@ -131,14 +187,14 @@ app.post("/webhook", async (req, res) => {
 
       await sendMessage(
         chatId,
-        "Please reply with **yes** or **no** so I can guide you correctly."
+        "Just to confirm — do you have ARC access? Please reply yes or no."
       );
 
       return res.sendStatus(200);
     }
 
-    // === CONTRACT STAGE ===
-    if (state === "CONTRACT_STAGE") {
+    /* STEP 3 — Contracting stage */
+    if (state.step === "STAGE") {
       pendingState.delete(chatId);
 
       if (text.includes("haven’t") || text.includes("not started")) {
@@ -166,7 +222,7 @@ app.post("/webhook", async (req, res) => {
 
       await sendMessage(
         chatId,
-        "Thanks. I’m escalating this to Chris so he can guide you on the next step."
+        "Thanks — I’m escalating this to Chris so he can guide you on the next step."
       );
 
       await sendDMToChris(
@@ -175,34 +231,6 @@ app.post("/webhook", async (req, res) => {
 
       return res.sendStatus(200);
     }
-
-    /* ---------------------------
-       ENTRY POINT
-    ---------------------------- */
-    if (text.includes("sign") && text.includes("agreement")) {
-      pendingState.set(chatId, "ARC_ACCESS");
-
-      await sendMessage(
-        chatId,
-        "Quick check first — do you already have access to the ARC website using your NAA credentials? (yes / no)"
-      );
-
-      return res.sendStatus(200);
-    }
-
-    /* ---------------------------
-       FALLBACK
-    ---------------------------- */
-    await sendMessage(
-      chatId,
-      "I’m not sure how to proceed with this yet. I’m escalating this to Chris for guidance."
-    );
-
-    await sendDMToChris(
-      `⚠️ UNRESOLVED QUESTION\nAgent: ${agentLabel}\nQuestion:\n"${rawText}"`
-    );
-
-    return res.sendStatus(200);
 
   } catch (err) {
     console.error("Webhook error:", err);
