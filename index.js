@@ -35,7 +35,11 @@ const pendingState = new Map();
 ---------------------------- */
 const getSOPIntent = (text) => {
   const t = text.toLowerCase();
-  if (t.includes("contract") || t.includes("agreement") || t.includes("arc")) {
+  if (
+    t.includes("contract") ||
+    t.includes("agreement") ||
+    t.includes("arc")
+  ) {
     return "CONTRACTING";
   }
   return null;
@@ -81,9 +85,9 @@ app.post("/webhook", async (req, res) => {
 
     console.log("Incoming:", agentLabel, rawText);
 
-    /* ============================
-       1️⃣ HARD ESCALATION (ALWAYS FIRST)
-       ============================ */
+    /* =========================
+       1️⃣ HARD ESCALATION FIRST
+    ========================== */
     if (isHardEscalation(text)) {
       await sendMessage(
         chatId,
@@ -97,123 +101,100 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    /* ============================
-       2️⃣ ACTIVE SOP FLOW (PRIORITY)
-       ============================ */
+    /* =========================
+       2️⃣ ACTIVE STATE HANDLER
+       (THIS IS THE FIX)
+    ========================== */
     const state = pendingState.get(chatId);
 
-    if (state?.intent === "CONTRACTING") {
-      /* ---- ARC ACCESS CHECK ---- */
-      if (state.step === "ARC_ACCESS") {
-        const yes = ["yes", "yep", "yeah", "i do", "have"].some(w => text.includes(w));
-        const no = ["no", "no access", "none", "dont", "don't"].some(w => text.includes(w));
+    // --- ARC ACCESS STEP ---
+    if (state?.step === "ARC_ACCESS") {
+      const yesAnswers = ["yes", "yep", "yeah", "i do", "have"];
+      const noAnswers = ["no", "no access", "none", "dont", "don't"];
 
-        if (no) {
-          pendingState.delete(chatId);
-
-          await sendMessage(
-            chatId,
-            "You’ll need ARC access first.\n\n" +
-            "1. Go to https://arc.naaleads.com\n" +
-            "2. Log in using your NAA credentials\n\n" +
-            "If you didn’t receive access or can’t log in, email contracting@naaleads.com."
-          );
-
-          await sendDMToChris(
-            `🚨 ARC ACCESS ISSUE\nAgent: ${agentLabel}\nAgent reports NO ARC access.`
-          );
-
-          return res.sendStatus(200);
-        }
-
-        if (yes) {
-          pendingState.set(chatId, { intent: "CONTRACTING", step: "STAGE" });
-
-          await sendMessage(
-            chatId,
-            "Which part are you currently on?\n" +
-            "• Haven’t started contracting\n" +
-            "• Submitted contracting requests\n" +
-            "• Waiting for carrier approval\n" +
-            "• Not sure / stuck"
-          );
-
-          return res.sendStatus(200);
-        }
-
-        await sendMessage(
-          chatId,
-          "Please reply **yes** or **no** so I can guide you correctly."
-        );
-        return res.sendStatus(200);
-      }
-
-      /* ---- CONTRACTING STAGE ---- */
-      if (state.step === "STAGE") {
+      if (noAnswers.some(a => text.includes(a))) {
         pendingState.delete(chatId);
 
-        if (text.includes("haven’t") || text.includes("not started")) {
-          await sendMessage(
-            chatId,
-            "Next steps:\n" +
-            "1. Log in to ARC\n" +
-            "2. Click My Business → Contracting\n" +
-            "3. Select Contracting Request\n" +
-            "4. Start with recommended carriers only."
-          );
-          return res.sendStatus(200);
-        }
-
-        if (text.includes("submitted")) {
-          await sendMessage(
-            chatId,
-            "To check your status:\n" +
-            "1. Go to ARC\n" +
-            "2. Open Contracting → My Contracts\n" +
-            "3. Review carrier approval status."
-          );
-          return res.sendStatus(200);
-        }
-
         await sendMessage(
           chatId,
-          "Thanks — I’m escalating this to Chris so he can guide you on the next step."
+          "You’ll need ARC access first.\n\n" +
+          "1. Go to https://arc.naaleads.com\n" +
+          "2. Log in using your NAA credentials\n\n" +
+          "If you didn’t receive access or can’t log in, email contracting@naaleads.com."
         );
 
         await sendDMToChris(
-          `⚠️ CONTRACTING STUCK\nAgent: ${agentLabel}\nResponse:\n"${rawText}"`
+          `🚨 ARC ACCESS ISSUE\nAgent: ${agentLabel}\nAgent reports NO ARC access.`
         );
 
         return res.sendStatus(200);
       }
-    }
 
-    /* ============================
-       3️⃣ SOP INTENT DETECTION
-       ============================ */
-    const intent = getSOPIntent(text);
+      if (yesAnswers.some(a => text.includes(a))) {
+        pendingState.set(chatId, { intent: "CONTRACTING", step: "STAGE" });
 
-    if (intent === "CONTRACTING") {
-      pendingState.set(chatId, { intent: "CONTRACTING", step: "ARC_ACCESS" });
+        await sendMessage(
+          chatId,
+          "Which part are you currently on?\n" +
+          "• Haven’t started contracting\n" +
+          "• Submitted contracting requests\n" +
+          "• Waiting for carrier approval\n" +
+          "• Not sure / stuck"
+        );
+
+        return res.sendStatus(200);
+      }
 
       await sendMessage(
         chatId,
-        "Quick check first — do you already have access to the ARC website using your NAA credentials? (yes / no)"
+        "Just to confirm — do you have ARC access? Please reply **yes** or **no**."
       );
 
       return res.sendStatus(200);
     }
 
-    /* ============================
-       4️⃣ KB GAP (NO SOP)
-       ============================ */
+    /* =========================
+       3️⃣ NEW QUESTION (NO STATE)
+    ========================== */
+    if (!state) {
+      const intent = getSOPIntent(text);
+
+      if (!intent) {
+        await sendMessage(
+          chatId,
+          "This question isn’t in my approved knowledge base yet. I’ll escalate this to Chris for review."
+        );
+
+        await sendDMToChris(
+          `📚 KB GAP\nAgent: ${agentLabel}\nQuestion:\n"${rawText}"`
+        );
+
+        return res.sendStatus(200);
+      }
+
+      // Start contracting flow
+      if (intent === "CONTRACTING") {
+        pendingState.set(chatId, { intent: "CONTRACTING", step: "ARC_ACCESS" });
+
+        await sendMessage(
+          chatId,
+          "Quick check first — do you already have access to the ARC website using your NAA credentials? (yes / no)"
+        );
+
+        return res.sendStatus(200);
+      }
+    }
+
+    /* =========================
+       4️⃣ FALLBACK (SAFETY NET)
+    ========================== */
     await sendMessage(
       chatId,
-      "This question isn’t in my approved knowledge base yet. I’ll escalate this to Chris for review."
+      "I’m not sure how to proceed with this yet. I’m escalating this to Chris for guidance."
     );
 
     await sendDMToChris(
-      `📚 KB GAP\nAgent: ${agentLabel}\nQuestion:\n"${rawText}"`
+      `⚠️ UNRESOLVED QUESTION\nAgent: ${agentLabel}\nQuestion:\n"${rawText}"`
     );
 
     return res.sendStatus(200);
