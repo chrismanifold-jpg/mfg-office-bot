@@ -5,7 +5,6 @@ const app = express();
 app.use(express.json());
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const CHRIS_TELEGRAM_ID = process.env.CHRIS_TELEGRAM_ID;
 const PORT = process.env.PORT || 3000;
 
@@ -26,6 +25,11 @@ const sendDMToChris = async (text) => {
 };
 
 /* ---------------------------
+   Light Conversation State
+---------------------------- */
+const pendingQuestion = new Map(); // chatId -> "ARC_ACCESS"
+
+/* ---------------------------
    GATING
 ---------------------------- */
 const shouldRespond = (text) => {
@@ -36,7 +40,6 @@ const shouldRespond = (text) => {
 
   const triggers = [
     "how",
-    "how do i",
     "sign",
     "contract",
     "agreement",
@@ -108,10 +111,52 @@ app.post("/webhook", async (req, res) => {
     }
 
     /* ---------------------------
+       Handle pending ARC access reply
+    ---------------------------- */
+    const pending = pendingQuestion.get(chatId);
+    if (pending === "ARC_ACCESS") {
+      pendingQuestion.delete(chatId);
+      const t = text.toLowerCase();
+
+      if (t === "no" || t.includes("no")) {
+        await sendMessage(
+          chatId,
+          "You’ll need ARC access first.\n\n" +
+          "1. Go to https://arc.naaleads.com\n" +
+          "2. Log in using your NAA credentials\n\n" +
+          "If you did not receive access or can’t log in, contact contracting@naaleads.com."
+        );
+
+        await sendDMToChris(
+          `🚨 ARC ACCESS ISSUE\nAgent: ${agentLabel}\nAgent reports NO ARC access.`
+        );
+
+        return res.sendStatus(200);
+      }
+
+      if (t === "yes" || t.includes("yes")) {
+        await sendMessage(
+          chatId,
+          "Which part are you currently on?\n" +
+          "• Haven’t started contracting\n" +
+          "• Submitted contracting requests\n" +
+          "• Waiting for carrier approval\n" +
+          "• Not sure / stuck"
+        );
+        return res.sendStatus(200);
+      }
+
+      await sendMessage(
+        chatId,
+        "Just to confirm — do you have ARC access? Please reply yes or no."
+      );
+      pendingQuestion.set(chatId, "ARC_ACCESS");
+      return res.sendStatus(200);
+    }
+
+    /* ---------------------------
        CONTRACT AGREEMENT FLOW
     ---------------------------- */
-
-    // Step 1: Access check
     if (
       text.toLowerCase().includes("sign") &&
       text.toLowerCase().includes("agreement")
@@ -120,51 +165,19 @@ app.post("/webhook", async (req, res) => {
         chatId,
         "Quick check first — do you already have access to the ARC website using your NAA credentials?"
       );
+      pendingQuestion.set(chatId, "ARC_ACCESS");
       return res.sendStatus(200);
     }
 
-    // Step 2: No ARC access
-    if (
-      text.toLowerCase().includes("no") &&
-      text.toLowerCase().includes("access")
-    ) {
-      await sendMessage(
-        chatId,
-        "You’ll need ARC access first.\n" +
-        "Go to https://arc.naaleads.com and log in using your NAA credentials.\n" +
-        "If you didn’t receive access or can’t log in, contact contracting@naaleads.com."
-      );
-
-      await sendDMToChris(
-        `🚨 ARC ACCESS ISSUE\nAgent: ${agentLabel}\nAgent reports no ARC access.`
-      );
-
-      return res.sendStatus(200);
-    }
-
-    // Step 3: Has access → ask stage
-    if (
-      text.toLowerCase().includes("yes") &&
-      text.toLowerCase().includes("access")
-    ) {
-      await sendMessage(
-        chatId,
-        "Which part are you currently on?\n" +
-        "• Haven’t started contracting\n" +
-        "• Submitted contracting requests\n" +
-        "• Waiting for carrier approval\n" +
-        "• Not sure / stuck"
-      );
-      return res.sendStatus(200);
-    }
-
-    // Step 4: Stage responses
+    /* ---------------------------
+       STAGE RESPONSES
+    ---------------------------- */
     if (text.toLowerCase().includes("haven’t started")) {
       await sendMessage(
         chatId,
         "Next steps:\n" +
         "1. Log in to ARC\n" +
-        "2. Click My Business → Contracting\n" +
+        "2. Go to My Business → Contracting\n" +
         "3. Select Contracting Request\n" +
         "4. Start with recommended carriers only."
       );
@@ -175,15 +188,17 @@ app.post("/webhook", async (req, res) => {
       await sendMessage(
         chatId,
         "To check your status:\n" +
-        "1. Go to ARC\n" +
+        "1. Log in to ARC\n" +
         "2. Open Contracting → My Contracts\n" +
-        "3. Review the status for each carrier."
+        "3. Review each carrier’s status."
       );
       return res.sendStatus(200);
     }
 
-    // Step 5: Stuck → clarify #2
-    if (text.toLowerCase().includes("stuck") || text.toLowerCase().includes("not sure")) {
+    if (
+      text.toLowerCase().includes("stuck") ||
+      text.toLowerCase().includes("not sure")
+    ) {
       await sendMessage(
         chatId,
         "What issue are you seeing?\n" +
@@ -194,14 +209,14 @@ app.post("/webhook", async (req, res) => {
       );
 
       await sendDMToChris(
-        `⚠️ AGENT STUCK\nAgent: ${agentLabel}\nReported being stuck during contracting.`
+        `⚠️ AGENT STUCK\nAgent: ${agentLabel}\nAgent reports being stuck during contracting.`
       );
 
       return res.sendStatus(200);
     }
 
     /* ---------------------------
-       Fallback (unknown path)
+       Fallback
     ---------------------------- */
     await sendMessage(
       chatId,
