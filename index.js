@@ -162,7 +162,7 @@ app.post("/webhook", async (req, res) => {
       if (!intent) {
         await sendMessage(
           chatId,
-          "This question isn’t in my approved knowledge base yet. I’ll escalate this to Chris for review."
+          "This question isn’t in my approved knowledge base yet. I’ll escalate this to Chris for review. (working live code confirmation)"
         );
 
         await sendDMToChris(
