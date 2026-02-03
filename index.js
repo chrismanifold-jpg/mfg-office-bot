@@ -10,27 +10,48 @@ const CHRIS_TELEGRAM_ID = process.env.CHRIS_TELEGRAM_ID;
 const PORT = process.env.PORT || 3000;
 
 /* ---------------------------
-   Constants
+   Helpers
 ---------------------------- */
-const KB_MISS_REPLY =
-  "This question isn’t in my approved knowledge base yet. I’ll escalate this to Chris for review.";
+const sendMessage = async (chatId, text) => {
+  await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, text })
+  });
+};
+
+const sendDMToChris = async (text) => {
+  if (!CHRIS_TELEGRAM_ID) return;
+  await sendMessage(Number(CHRIS_TELEGRAM_ID), text);
+};
 
 /* ---------------------------
-   Escalation Dedup Memory
+   GATING
 ---------------------------- */
-const escalatedCases = new Map();
-const ESCALATION_TTL_MS = 24 * 60 * 60 * 1000;
+const shouldRespond = (text) => {
+  if (!text) return false;
+  const t = text.toLowerCase();
 
-const normalizeText = (text) =>
-  text
-    .toLowerCase()
-    .replace(/\$[\d,]+/g, "$AMOUNT")
-    .replace(/\d+/g, "N")
-    .replace(/\s+/g, " ")
-    .trim();
+  if (t.includes("?")) return true;
+
+  const triggers = [
+    "how",
+    "how do i",
+    "sign",
+    "contract",
+    "agreement",
+    "arc",
+    "stuck",
+    "not sure",
+    "can't",
+    "blocked"
+  ];
+
+  return triggers.some(k => t.includes(k));
+};
 
 /* ---------------------------
-   HARD ESCALATION DETECTOR
+   HIGH-RISK ESCALATION
 ---------------------------- */
 const isHardEscalation = (text) => {
   const t = text.toLowerCase();
@@ -44,95 +65,9 @@ const isHardEscalation = (text) => {
 };
 
 /* ---------------------------
-   RAG — SOP REGISTRY
----------------------------- */
-const SOP_LIBRARY = [
-  {
-    id: "contracting",
-    title: "SOP – Contracting Checklist",
-    keywords: [
-      "contracting",
-      "agent agreement",
-      "arc",
-      "naa",
-      "carrier contracting",
-      "w-9",
-      "licenses",
-      "tax document"
-    ],
-    content: `
-PURPOSE:
-Guide agents through the contracting process.
-
-STEPS:
-1. Log in to Training Portals:
-   - https://www.tristategrp.com
-   - https://naauniversity.com/login/
-2. Complete required training modules
-3. Complete ARC checklist:
-   - Agent Agreement
-   - Licenses
-   - W-9
-   - Carrier Contracting
-   - Personal Use Policy
-   - ARC Deposit
-
-ESCALATE IF:
-- No portal access after 48 hours
-- Licensing issue blocks submission
-`
-  }
-];
-
-const findMatchingSOP = (text) => {
-  const t = text.toLowerCase();
-  return SOP_LIBRARY.find(sop =>
-    sop.keywords.some(k => t.includes(k))
-  );
-};
-
-/* ---------------------------
-   SOP STEP 4 — GATING
----------------------------- */
-const shouldRespond = (text) => {
-  if (!text) return false;
-  const t = text.toLowerCase().trim();
-
-  if (t.includes("?")) return true;
-
-  const starters = [
-    "how",
-    "how do i",
-    "what",
-    "what is",
-    "what are",
-    "when",
-    "where",
-    "who",
-    "can you",
-    "should i",
-    "help",
-    "next step",
-    "next steps"
-  ];
-
-  if (starters.some(p => t === p || t.startsWith(p + " "))) return true;
-
-  const contains = [
-    "need help",
-    "stuck",
-    "blocked",
-    "i can't",
-    "not sure what to do"
-  ];
-
-  return contains.some(p => t.includes(p));
-};
-
-/* ---------------------------
    Health Check
 ---------------------------- */
-app.get("/", (req, res) => {
+app.get("/", (_, res) => {
   res.send("MFG Office Bot is running ✅");
 });
 
@@ -141,12 +76,12 @@ app.get("/", (req, res) => {
 ---------------------------- */
 app.post("/webhook", async (req, res) => {
   try {
-    const message = req.body.message;
-    if (!message || !message.text) return res.sendStatus(200);
+    const msg = req.body.message;
+    if (!msg || !msg.text) return res.sendStatus(200);
 
-    const chatId = message.chat.id;
-    const text = message.text;
-    const user = message.from;
+    const chatId = msg.chat.id;
+    const text = msg.text.trim();
+    const user = msg.from;
 
     const agentName = `${user.first_name || ""} ${user.last_name || ""}`.trim();
     const agentUsername = user.username ? `@${user.username}` : "no_username";
@@ -157,119 +92,125 @@ app.post("/webhook", async (req, res) => {
     if (!shouldRespond(text)) return res.sendStatus(200);
 
     /* ---------------------------
-       HARD ESCALATION (BYPASS RAG)
+       HARD ESCALATION (always first)
     ---------------------------- */
     if (isHardEscalation(text)) {
-      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text:
-            "This looks like a high-risk or high-value case. I’m escalating this to Chris for guidance."
-        })
-      });
+      await sendMessage(
+        chatId,
+        "This looks like a high-risk or high-value case. I’m escalating this to Chris for guidance."
+      );
 
-      const dedupKey = `${chatId}:${normalizeText(text)}`;
-      const now = Date.now();
-      const last = escalatedCases.get(dedupKey);
-
-      if (!last || now - last > ESCALATION_TTL_MS) {
-        escalatedCases.set(dedupKey, now);
-
-        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            chat_id: Number(CHRIS_TELEGRAM_ID),
-            text: `🚨 CASE ESCALATION\n\nAgent: ${agentLabel}\nQuestion:\n"${text}"`
-          })
-        });
-      }
+      await sendDMToChris(
+        `🚨 HIGH-RISK CASE\nAgent: ${agentLabel}\nQuestion:\n"${text}"`
+      );
 
       return res.sendStatus(200);
     }
 
     /* ---------------------------
-       RAG — SOP ENFORCEMENT
+       CONTRACT AGREEMENT FLOW
     ---------------------------- */
-    const matchedSOP = findMatchingSOP(text);
 
-    if (!matchedSOP) {
-      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: KB_MISS_REPLY
-        })
-      });
+    // Step 1: Access check
+    if (
+      text.toLowerCase().includes("sign") &&
+      text.toLowerCase().includes("agreement")
+    ) {
+      await sendMessage(
+        chatId,
+        "Quick check first — do you already have access to the ARC website using your NAA credentials?"
+      );
+      return res.sendStatus(200);
+    }
 
-      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: Number(CHRIS_TELEGRAM_ID),
-          text: `📚 KB GAP\n\nAgent: ${agentLabel}\nQuestion:\n"${text}\n\n
-          Hey Chris I don't know how to answer this one, can you reach back to the group to solve this concern?
-          However what I need is a approve SOP for this concern so it can be add to my knowledge base by Jodie"`
-        })
-      });
+    // Step 2: No ARC access
+    if (
+      text.toLowerCase().includes("no") &&
+      text.toLowerCase().includes("access")
+    ) {
+      await sendMessage(
+        chatId,
+        "You’ll need ARC access first.\n" +
+        "Go to https://arc.naaleads.com and log in using your NAA credentials.\n" +
+        "If you didn’t receive access or can’t log in, contact contracting@naaleads.com."
+      );
+
+      await sendDMToChris(
+        `🚨 ARC ACCESS ISSUE\nAgent: ${agentLabel}\nAgent reports no ARC access.`
+      );
+
+      return res.sendStatus(200);
+    }
+
+    // Step 3: Has access → ask stage
+    if (
+      text.toLowerCase().includes("yes") &&
+      text.toLowerCase().includes("access")
+    ) {
+      await sendMessage(
+        chatId,
+        "Which part are you currently on?\n" +
+        "• Haven’t started contracting\n" +
+        "• Submitted contracting requests\n" +
+        "• Waiting for carrier approval\n" +
+        "• Not sure / stuck"
+      );
+      return res.sendStatus(200);
+    }
+
+    // Step 4: Stage responses
+    if (text.toLowerCase().includes("haven’t started")) {
+      await sendMessage(
+        chatId,
+        "Next steps:\n" +
+        "1. Log in to ARC\n" +
+        "2. Click My Business → Contracting\n" +
+        "3. Select Contracting Request\n" +
+        "4. Start with recommended carriers only."
+      );
+      return res.sendStatus(200);
+    }
+
+    if (text.toLowerCase().includes("submitted")) {
+      await sendMessage(
+        chatId,
+        "To check your status:\n" +
+        "1. Go to ARC\n" +
+        "2. Open Contracting → My Contracts\n" +
+        "3. Review the status for each carrier."
+      );
+      return res.sendStatus(200);
+    }
+
+    // Step 5: Stuck → clarify #2
+    if (text.toLowerCase().includes("stuck") || text.toLowerCase().includes("not sure")) {
+      await sendMessage(
+        chatId,
+        "What issue are you seeing?\n" +
+        "• Login issue\n" +
+        "• Missing documents\n" +
+        "• Contract rejected\n" +
+        "• No status update"
+      );
+
+      await sendDMToChris(
+        `⚠️ AGENT STUCK\nAgent: ${agentLabel}\nReported being stuck during contracting.`
+      );
 
       return res.sendStatus(200);
     }
 
     /* ---------------------------
-       OPENAI (RAG SAFE)
+       Fallback (unknown path)
     ---------------------------- */
-    const systemInstructions = `
-You may ONLY answer using the SOP below.
-If insufficient, escalate.
-
-APPROVED SOP:
-${matchedSOP.content}
-
-OUTPUT:
-USER_REPLY:
-<short answer>
-ESCALATE: <YES/NO>
-DM_TO_CHRIS:
-<only if YES>
-`;
-
-    const openaiResponse = await fetch(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${OPENAI_API_KEY}`
-        },
-        body: JSON.stringify({
-          model: "gpt-4.1-mini",
-          messages: [
-            { role: "system", content: systemInstructions },
-            { role: "user", content: text }
-          ],
-          temperature: 0
-        })
-      }
+    await sendMessage(
+      chatId,
+      "I don’t have enough information to proceed. I’m escalating this to Chris for guidance."
     );
 
-    const data = await openaiResponse.json();
-    const output = data.choices?.[0]?.message?.content || "";
-
-    const replyMatch = output.match(/USER_REPLY:\s*([\s\S]*)/);
-    if (replyMatch) {
-      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: replyMatch[1].trim()
-        })
-      });
-    }
+    await sendDMToChris(
+      `⚠️ UNRESOLVED CONTRACTING QUESTION\nAgent: ${agentLabel}\nQuestion:\n"${text}"`
+    );
 
     return res.sendStatus(200);
 
