@@ -35,9 +35,15 @@ const pendingState = new Map();
 ---------------------------- */
 const getSOPIntent = (text) => {
   const t = text.toLowerCase();
-  if (t.includes("contract") || t.includes("agreement") || t.includes("arc")) {
+
+  if (
+    t.includes("contract") ||
+    t.includes("agreement") ||
+    t.includes("arc")
+  ) {
     return "CONTRACTING";
   }
+
   return null;
 };
 
@@ -88,7 +94,9 @@ app.post("/webhook", async (req, res) => {
 
     console.log("Incoming:", agentLabel, rawText);
 
-    /* 1️⃣ HARD ESCALATION */
+    /* ---------------------------
+       1️⃣ HARD ESCALATION (ALWAYS FIRST)
+    ---------------------------- */
     if (isHardEscalation(text)) {
       await sendMessage(
         chatId,
@@ -102,7 +110,9 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    /* 2️⃣ SOP INTENT CHECK */
+    /* ---------------------------
+       2️⃣ SOP INTENT CHECK
+    ---------------------------- */
     const intent = getSOPIntent(text);
     clearStateIfIntentChanged(chatId, intent);
 
@@ -120,7 +130,7 @@ app.post("/webhook", async (req, res) => {
     }
 
     /* ============================
-       CONTRACTING SOP FLOW
+       CONTRACTING SOP DECISION TREE
        ============================ */
 
     const state = pendingState.get(chatId);
@@ -137,7 +147,7 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    /* STEP 2 — ARC ACCESS */
+    /* STEP 2 — Handle ARC access */
     if (state.step === "ARC_ACCESS") {
       const yesAnswers = ["yes", "yep", "yeah", "have", "i do"];
       const noAnswers = ["no", "no access", "none", "dont", "don't"];
@@ -183,70 +193,40 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    /* STEP 3 — CONTRACTING STAGE */
+    /* STEP 3 — Contracting stage */
     if (state.step === "STAGE") {
       pendingState.delete(chatId);
 
-      // NOT STARTED / STEPS
-      if (
-        text.includes("haven’t started") ||
-        text.includes("havent started") ||
-        text.includes("not started") ||
-        text.includes("start contracting") ||
-        text.includes("steps")
-      ) {
+      if (text.includes("haven’t") || text.includes("not started")) {
         await sendMessage(
           chatId,
-          "Here’s how to start your contracting:\n\n" +
-          "1. Log in to ARC: https://arc.naaleads.com\n" +
-          "2. Go to **My Business → Contracting**\n" +
-          "3. Click **New Contracting Request**\n" +
-          "4. Start with recommended carriers only\n" +
-          "5. Complete each required section before submitting\n\n" +
-          "If something blocks you, tell me exactly where."
-        );
-        return res.sendStatus(200);
-      }
-
-      // SUBMITTED / WAITING
-      if (text.includes("submitted") || text.includes("waiting") || text.includes("pending")) {
-        await sendMessage(
-          chatId,
-          "To check your contracting status:\n\n" +
+          "Next steps:\n" +
           "1. Log in to ARC\n" +
-          "2. Open **Contracting → My Contracts**\n" +
-          "3. Review the status for each carrier\n\n" +
-          "If one carrier is delayed, tell me which one."
+          "2. Click My Business → Contracting\n" +
+          "3. Select Contracting Request\n" +
+          "4. Start with recommended carriers only."
         );
         return res.sendStatus(200);
       }
 
-      // STUCK
-      if (text.includes("stuck") || text.includes("not sure")) {
+      if (text.includes("submitted")) {
         await sendMessage(
           chatId,
-          "What issue are you running into?\n\n" +
-          "• Login issue\n" +
-          "• Missing documents\n" +
-          "• Contract rejected\n" +
-          "• No status update"
+          "To check your status:\n" +
+          "1. Go to ARC\n" +
+          "2. Open Contracting → My Contracts\n" +
+          "3. Review carrier approval status."
         );
-
-        await sendDMToChris(
-          `⚠️ CONTRACTING STUCK\nAgent: ${agentLabel}\nResponse:\n"${rawText}"`
-        );
-
         return res.sendStatus(200);
       }
 
-      // FALLBACK
       await sendMessage(
         chatId,
         "Thanks — I’m escalating this to Chris so he can guide you on the next step."
       );
 
       await sendDMToChris(
-        `⚠️ CONTRACTING UNKNOWN STAGE\nAgent: ${agentLabel}\nResponse:\n"${rawText}"`
+        `⚠️ CONTRACTING STUCK\nAgent: ${agentLabel}\nResponse:\n"${rawText}"`
       );
 
       return res.sendStatus(200);
