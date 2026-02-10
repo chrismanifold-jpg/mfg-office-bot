@@ -1,21 +1,19 @@
 import { google } from "googleapis";
 
-export const getDriveClient = () => {
-  if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
-    throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_JSON");
-  }
+const auth = new google.auth.GoogleAuth({
+  credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON),
+  scopes: ["https://www.googleapis.com/auth/drive.readonly"]
+});
 
-  const credentials = JSON.parse(
-    process.env.GOOGLE_SERVICE_ACCOUNT_JSON
-  );
+const drive = google.drive({ version: "v3", auth });
 
-  const auth = new google.auth.GoogleAuth({
-    credentials: {
-      client_email: credentials.client_email,
-      private_key: credentials.private_key.replace(/\\n/g, "\n"),
-    },
-    scopes: ["https://www.googleapis.com/auth/drive.readonly"],
+export const listSOPFiles = async () => {
+  const folderId = process.env.GOOGLE_DRIVE_SOP_FOLDER_ID;
+
+  const res = await drive.files.list({
+    q: `'${folderId}' in parents and trashed = false`,
+    fields: "files(id, name, mimeType)",
   });
 
-  return google.drive({ version: "v3", auth });
+  return res.data.files || [];
 };
