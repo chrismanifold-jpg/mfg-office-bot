@@ -1,5 +1,6 @@
 import express from "express";
 import fetch from "node-fetch";
+import { listSOPFiles } from "./googleDrive.js";
 
 const app = express();
 app.use(express.json());
@@ -57,21 +58,31 @@ const isHardEscalation = (text) => {
     /\$\s?\d{2,}/.test(t)
   );
 };
-
 /* =========================
-   HEALTH / TEST ROUTES
+   GOOGLE DRIVE TEST ROUTE
 ========================= */
-app.get("/", (_, res) => {
-  res.send("MFG Office Bot is running ✅");
+app.get("/test-drive", async (_, res) => {
+  try {
+    const files = await listSOPFiles();
+
+    res.json({
+      status: "success",
+      count: files.length,
+      files: files.map(f => ({
+        id: f.id,
+        name: f.name,
+        type: f.mimeType
+      }))
+    });
+  } catch (err) {
+    console.error("Google Drive test error:", err);
+    res.status(500).json({
+      status: "error",
+      message: err.message
+    });
+  }
 });
 
-app.get("/test", (_, res) => {
-  res.json({
-    status: "OK",
-    service: "mfg-office-bot",
-    timestamp: new Date().toISOString()
-  });
-});
 
 /* =========================
    TELEGRAM WEBHOOK
