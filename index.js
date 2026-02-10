@@ -1,17 +1,19 @@
 import express from "express";
 import fetch from "node-fetch";
-import { getDriveClient } from "./services/googleDrive.js"; // ✅ NEW
 
 const app = express();
 app.use(express.json());
 
+/* =========================
+   ENV
+========================= */
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHRIS_TELEGRAM_ID = process.env.CHRIS_TELEGRAM_ID;
 const PORT = process.env.PORT || 3000;
 
-/* ---------------------------
-   Helpers
----------------------------- */
+/* =========================
+   HELPERS
+========================= */
 const sendMessage = async (chatId, text) => {
   await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
     method: "POST",
@@ -25,29 +27,26 @@ const sendDMToChris = async (text) => {
   await sendMessage(Number(CHRIS_TELEGRAM_ID), text);
 };
 
-/* ---------------------------
-   Conversation State
----------------------------- */
+/* =========================
+   CONVERSATION STATE
+   chatId → { intent, step }
+========================= */
 const pendingState = new Map();
 
-/* ---------------------------
-   SOP Intent Detection
----------------------------- */
-const getSOPIntent = (text) => {
+/* =========================
+   INTENT DETECTION
+========================= */
+const getIntent = (text) => {
   const t = text.toLowerCase();
-  if (
-    t.includes("contract") ||
-    t.includes("agreement") ||
-    t.includes("arc")
-  ) {
+  if (t.includes("contract") || t.includes("agreement") || t.includes("arc")) {
     return "CONTRACTING";
   }
   return null;
 };
 
-/* ---------------------------
-   Hard Escalation
----------------------------- */
+/* =========================
+   HARD ESCALATION
+========================= */
 const isHardEscalation = (text) => {
   const t = text.toLowerCase();
   return (
@@ -59,35 +58,24 @@ const isHardEscalation = (text) => {
   );
 };
 
-/* ---------------------------
-   Health Check
----------------------------- */
+/* =========================
+   HEALTH / TEST ROUTES
+========================= */
 app.get("/", (_, res) => {
   res.send("MFG Office Bot is running ✅");
 });
 
-/* ---------------------------
-   🧪 TEMPORARY GOOGLE DRIVE TEST ROUTE
----------------------------- */
-app.get("/test-drive", async (_, res) => {
-  try {
-    const drive = getDriveClient();
-
-    const result = await drive.files.list({
-      q: "mimeType='application/pdf'",
-      fields: "files(id, name)",
-    });
-
-    res.json(result.data.files);
-  } catch (err) {
-    console.error("Drive test error:", err);
-    res.status(500).send(err.message);
-  }
+app.get("/test", (_, res) => {
+  res.json({
+    status: "OK",
+    service: "mfg-office-bot",
+    timestamp: new Date().toISOString()
+  });
 });
 
-/* ---------------------------
-   Telegram Webhook
----------------------------- */
+/* =========================
+   TELEGRAM WEBHOOK
+========================= */
 app.post("/webhook", async (req, res) => {
   try {
     const msg = req.body.message;
@@ -95,7 +83,7 @@ app.post("/webhook", async (req, res) => {
 
     const chatId = msg.chat.id;
     const rawText = msg.text;
-    const text = rawText.trim().toLowerCase();
+    const text = rawText.toLowerCase().trim();
     const user = msg.from;
 
     const agentName = `${user.first_name || ""} ${user.last_name || ""}`.trim();
@@ -125,11 +113,12 @@ app.post("/webhook", async (req, res) => {
     ========================== */
     const state = pendingState.get(chatId);
 
+    // ---- ARC ACCESS STEP ----
     if (state?.step === "ARC_ACCESS") {
-      const yesAnswers = ["yes", "yep", "yeah", "i do", "have"];
-      const noAnswers = ["no", "no access", "none", "dont", "don't"];
+      const yes = ["yes", "yep", "yeah", "i do", "have"];
+      const no = ["no", "no access", "none", "dont", "don't"];
 
-      if (noAnswers.some(a => text.includes(a))) {
+      if (no.some(v => text.includes(v))) {
         pendingState.delete(chatId);
 
         await sendMessage(
@@ -147,7 +136,7 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      if (yesAnswers.some(a => text.includes(a))) {
+      if (yes.some(v => text.includes(v))) {
         pendingState.set(chatId, { intent: "CONTRACTING", step: "STAGE" });
 
         await sendMessage(
@@ -164,7 +153,7 @@ app.post("/webhook", async (req, res) => {
 
       await sendMessage(
         chatId,
-        "Just to confirm — do you have ARC access? Please reply **yes** or **no**."
+        "Please reply **yes** or **no** so I can guide you correctly."
       );
 
       return res.sendStatus(200);
@@ -174,7 +163,7 @@ app.post("/webhook", async (req, res) => {
        3️⃣ NEW QUESTION
     ========================== */
     if (!state) {
-      const intent = getSOPIntent(text);
+      const intent = getIntent(text);
 
       if (!intent) {
         await sendMessage(
@@ -189,16 +178,15 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      if (intent === "CONTRACTING") {
-        pendingState.set(chatId, { intent: "CONTRACTING", step: "ARC_ACCESS" });
+      // Start CONTRACTING flow
+      pendingState.set(chatId, { intent: "CONTRACTING", step: "ARC_ACCESS" });
 
-        await sendMessage(
-          chatId,
-          "Quick check first — do you already have access to the ARC website using your NAA credentials? (yes / no)"
-        );
+      await sendMessage(
+        chatId,
+        "Quick check first — do you already have access to the ARC website using your NAA credentials? (yes / no)"
+      );
 
-        return res.sendStatus(200);
-      }
+      return res.sendStatus(200);
     }
 
     /* =========================
@@ -206,7 +194,7 @@ app.post("/webhook", async (req, res) => {
     ========================== */
     await sendMessage(
       chatId,
-      "I’m not sure how to proceed with this yet. I’m escalating this to Chris for guidance."
+      "I’m not sure how to proceed yet. I’m escalating this to Chris for guidance."
     );
 
     await sendDMToChris(
@@ -221,9 +209,9 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-/* ---------------------------
-   Start Server
----------------------------- */
+/* =========================
+   START SERVER
+========================= */
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
