@@ -1,5 +1,6 @@
 import express from "express";
 import fetch from "node-fetch";
+import { getDriveClient } from "./services/googleDrive.js"; // ✅ NEW
 
 const app = express();
 app.use(express.json());
@@ -26,7 +27,6 @@ const sendDMToChris = async (text) => {
 
 /* ---------------------------
    Conversation State
-   chatId -> { intent, step }
 ---------------------------- */
 const pendingState = new Map();
 
@@ -67,6 +67,25 @@ app.get("/", (_, res) => {
 });
 
 /* ---------------------------
+   🧪 TEMPORARY GOOGLE DRIVE TEST ROUTE
+---------------------------- */
+app.get("/test-drive", async (_, res) => {
+  try {
+    const drive = getDriveClient();
+
+    const result = await drive.files.list({
+      q: "mimeType='application/pdf'",
+      fields: "files(id, name)",
+    });
+
+    res.json(result.data.files);
+  } catch (err) {
+    console.error("Drive test error:", err);
+    res.status(500).send(err.message);
+  }
+});
+
+/* ---------------------------
    Telegram Webhook
 ---------------------------- */
 app.post("/webhook", async (req, res) => {
@@ -103,11 +122,9 @@ app.post("/webhook", async (req, res) => {
 
     /* =========================
        2️⃣ ACTIVE STATE HANDLER
-       (THIS IS THE FIX)
     ========================== */
     const state = pendingState.get(chatId);
 
-    // --- ARC ACCESS STEP ---
     if (state?.step === "ARC_ACCESS") {
       const yesAnswers = ["yes", "yep", "yeah", "i do", "have"];
       const noAnswers = ["no", "no access", "none", "dont", "don't"];
@@ -154,7 +171,7 @@ app.post("/webhook", async (req, res) => {
     }
 
     /* =========================
-       3️⃣ NEW QUESTION (NO STATE)
+       3️⃣ NEW QUESTION
     ========================== */
     if (!state) {
       const intent = getSOPIntent(text);
@@ -162,7 +179,7 @@ app.post("/webhook", async (req, res) => {
       if (!intent) {
         await sendMessage(
           chatId,
-          "This question isn’t in my approved knowledge base yet. I’ll escalate this to Chris for review. (working live code confirmation)"
+          "This question isn’t in my approved knowledge base yet. I’ll escalate this to Chris for review."
         );
 
         await sendDMToChris(
@@ -172,7 +189,6 @@ app.post("/webhook", async (req, res) => {
         return res.sendStatus(200);
       }
 
-      // Start contracting flow
       if (intent === "CONTRACTING") {
         pendingState.set(chatId, { intent: "CONTRACTING", step: "ARC_ACCESS" });
 
@@ -186,7 +202,7 @@ app.post("/webhook", async (req, res) => {
     }
 
     /* =========================
-       4️⃣ FALLBACK (SAFETY NET)
+       4️⃣ FALLBACK
     ========================== */
     await sendMessage(
       chatId,
