@@ -1,17 +1,21 @@
 import { google } from "googleapis";
 
-/**
- * Creates an authenticated Google Drive client
- */
 export const getDriveClient = () => {
+  if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+    throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_JSON");
+  }
+
+  const credentials = JSON.parse(
+    process.env.GOOGLE_SERVICE_ACCOUNT_JSON
+  );
+
   const auth = new google.auth.GoogleAuth({
     credentials: {
-      client_email: process.env.GOOGLE_CLIENT_EMAIL,
-      private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
+      client_email: credentials.client_email,
+      private_key: credentials.private_key.replace(/\\n/g, "\n"),
     },
     scopes: ["https://www.googleapis.com/auth/drive.readonly"],
   });
 
   return google.drive({ version: "v3", auth });
 };
-
