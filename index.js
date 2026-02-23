@@ -58,6 +58,10 @@ const isHardEscalation = (text) => {
     /\$\s?\d{2,}/.test(t)
   );
 };
+
+app.get("/", (_, res) => {
+  res.send("MFG Office Bot is running ✅");
+});
 /* =========================
    GOOGLE DRIVE TEST ROUTE
 ========================= */
