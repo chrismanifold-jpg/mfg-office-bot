@@ -1,20 +1,28 @@
 import { google } from "googleapis";
 
-/**
- * Lists SOP files from Google Drive
- */
+const SCOPES = ["https://www.googleapis.com/auth/drive.readonly"];
+
 export async function listSOPFiles() {
+  if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+    throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_JSON env variable");
+  }
+
+  const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+
   const auth = new google.auth.GoogleAuth({
-    credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON),
-    scopes: ["https://www.googleapis.com/auth/drive.readonly"]
+    credentials,
+    scopes: SCOPES,
   });
 
-  const drive = google.drive({ version: "v3", auth });
-
-  const res = await drive.files.list({
-    q: "mimeType != 'application/vnd.google-apps.folder'",
-    fields: "files(id, name, mimeType)"
+  const drive = google.drive({
+    version: "v3",
+    auth,
   });
 
-  return res.data.files || [];
+  const response = await drive.files.list({
+    pageSize: 20,
+    fields: "files(id, name, mimeType)",
+  });
+
+  return response.data.files;
 }
